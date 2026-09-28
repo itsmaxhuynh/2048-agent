@@ -1,0 +1,592 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>2048 agent viewer</title>
+<style>
+  :root{
+    --boardw:440px; --panelpad:20px; --readout:58px; --rowlbl:40px; --rowgap:9px;
+    --bg:#12141a; --panel:#1b1e27; --line:#2b2f3d; --ink:#e8eaf0; --dim:#98a0b3;
+    --accent:#6ea8ff; --good:#5ddc9a; --grid:#2a2d38;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font:16px/1.5 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+  header{padding:18px 28px;border-bottom:1px solid var(--line);display:flex;
+         align-items:baseline;gap:16px;flex-wrap:wrap}
+  h1{font-size:20px;margin:0;font-weight:650;letter-spacing:-.01em}
+  header .sub{color:var(--dim);font-size:14px}
+  /* The left column is sized to the board plus the panel's own padding and
+     border, so the board fills its box and the gap on the right matches the
+     one on the left. Anything wider leaves dead space beside the board. */
+  main{display:grid;
+       grid-template-columns:minmax(360px,calc(var(--boardw) + 2 * var(--panelpad) + 2px))
+                             minmax(340px,1fr);
+       gap:24px;padding:24px;align-items:start;max-width:1180px;margin:0 auto}
+  @media (max-width:900px){main{grid-template-columns:1fr}}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;
+    padding:var(--panelpad)}
+  .panel h2{font-size:13px;text-transform:uppercase;letter-spacing:.09em;
+            color:var(--dim);margin:0 0 14px;font-weight:600}
+
+  .stats{display:flex;gap:28px;margin-bottom:18px;flex-wrap:wrap}
+  .stat .k{font-size:12px;color:var(--dim);text-transform:uppercase;letter-spacing:.07em}
+  .stat .v{font-size:26px;font-weight:680;font-variant-numeric:tabular-nums;line-height:1.15}
+
+  /* Both templates are load-bearing. With rows left to `auto` the container's
+     aspect-ratio fixes the total height but the rows divide it by content, so a
+     row of empty cells collapses and the squares stop being square. */
+  .board{display:grid;grid-template-columns:repeat(4,1fr);grid-template-rows:repeat(4,1fr);
+         gap:9px;background:var(--grid);padding:9px;border-radius:12px;aspect-ratio:1;
+         max-width:var(--boardw)}
+  .cell{border-radius:8px;display:flex;align-items:center;justify-content:center;
+        min-width:0;min-height:0;
+        font-weight:700;font-variant-numeric:tabular-nums;background:#343849;
+        transition:background .05s linear,color .05s linear;
+        font-size:clamp(15px,3.2vw,30px)}
+
+  /* One row: the buttons keep their size and the speed control takes whatever
+     is left, so the slider never drops onto a line of its own. */
+  .controls{display:flex;gap:8px;align-items:center;margin-top:18px;flex-wrap:nowrap;
+    max-width:var(--boardw)}
+  .controls button{flex:0 0 auto}
+  /* Deeper search records a whole game before the first frame, so the wait is
+     paid on New game, not per move. 3 plies is minutes; keep it reachable but
+     not the default. */
+  .controls .depth{display:flex;align-items:center;gap:var(--rowgap);flex:0 0 auto}
+  /* The buttons alone fill the first row at the board's width. Putting the two
+     controls on their own row keeps both rows inside the board's edge and gives
+     the speed slider back the width it needs to be draggable. */
+  .controls.row2{margin-top:10px}
+  .controls .depth .rowlbl{min-width:0}
+  .controls .depth select{background:#2a2f3d;color:var(--ink);border:1px solid var(--line);
+    border-radius:7px;padding:7px 8px;font:inherit;font-size:13px}
+  .controls .speed{display:flex;align-items:center;gap:var(--rowgap);margin-left:auto;
+    min-width:0;flex:1 1 auto}
+  .controls .speed input[type=range]{flex:1 1 auto;min-width:44px;margin:0;
+    vertical-align:middle}
+  /* Reserved so 1/s -> 120/s cannot nudge the row. */
+  #speedlabel{flex:0 0 auto;min-width:var(--readout);text-align:right;
+    font-variant-numeric:tabular-nums}
+  button{background:#2a2f3d;color:var(--ink);border:1px solid var(--line);
+         border-radius:9px;padding:9px 12px;font:inherit;font-weight:560;cursor:pointer}
+  button:hover{background:#333949}
+  button.primary{background:var(--accent);color:#0b1020;border-color:transparent}
+  /* This button's label alternates Play/Pause. Without a reserved width the
+     buttons beside it jump every time it is pressed. */
+  #playpause{min-width:78px}
+  /* Back and Step sit either side of the playhead; equal widths so the row
+     never shifts as the labels change. */
+  #back,#step{min-width:68px}
+  /* Reserved so "Playing… 12s" cannot resize the row mid-wait. */
+  #newgame{min-width:146px}
+  button:disabled{opacity:.45;cursor:default}
+  button:disabled:hover{background:#2a2f3d}
+  button.primary:disabled:hover{background:var(--accent)}
+  button.primary:hover{filter:brightness(1.08)}
+  input[type=range]{accent-color:var(--accent)}
+  .scrub{display:flex;align-items:center;gap:var(--rowgap);margin-top:12px;
+    max-width:var(--boardw)}
+  /* Both rows are label - bar - number with identical spacing, so the two bar
+     tips land on the same pixel and the numbers share a right edge. */
+  .rowlbl{flex:0 0 auto;min-width:var(--rowlbl);color:var(--dim);font-size:13px}
+  .scrub input{flex:1;min-width:0;margin:0}
+  /* Same reserved width as #speedlabel, so both sliders end on the same
+     pixel and the two readouts share a right edge with the board. */
+  #scrublabel{flex:0 0 auto;min-width:var(--readout);text-align:right;
+    font-variant-numeric:tabular-nums}
+  .muted{color:var(--dim);font-size:13px;font-variant-numeric:tabular-nums}
+
+  table.evals{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
+  table.evals th{text-align:left;font-size:12px;color:var(--dim);font-weight:600;
+                 text-transform:uppercase;letter-spacing:.06em;padding-bottom:8px}
+  table.evals td{padding:7px 0;border-top:1px solid var(--line);font-size:14px;
+    height:40px;vertical-align:top;
+                 white-space:nowrap}
+  table.evals td:first-child{width:40%}
+  table.evals td.num,table.evals th.num{text-align:right}
+  tr.chosen td{color:var(--good);font-weight:650}
+  tr.illegal td{color:#5a6070}
+  .bar{height:6px;background:#2a2f3d;border-radius:3px;overflow:hidden;margin-top:5px}
+  .bar i{display:block;height:100%;background:var(--accent)}
+  tr.chosen .bar i{background:var(--good)}
+  /* Says which move the agent took. An arrow made the audience decode a symbol;
+     the word costs nothing and the row is already reserved for it. */
+  .pick{margin-left:7px;font-size:10px;letter-spacing:.07em;text-transform:uppercase;
+    color:var(--good);border:1px solid var(--good);border-radius:3px;padding:1px 5px;
+    vertical-align:1px}
+
+  svg{width:100%;height:230px;display:block}
+  .axis{stroke:var(--line);stroke-width:1}
+  .curve{fill:none;stroke:var(--accent);stroke-width:2}
+
+  /* Where alpha dropped. Dashed so it reads as an annotation, not as data. */
+  .decay{stroke-width:1;stroke-dasharray:3 3;opacity:.55}
+  /* Second run, same stage colour: shape carries the stage, dash carries the run. */
+  .curve.alt{stroke-dasharray:6 4}
+  .legend i.alt{background:none !important;background-image:repeating-linear-gradient(90deg,currentColor 0 5px,transparent 5px 9px) !important}
+  .legend{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px;font-size:12px;
+    font-variant-numeric:tabular-nums}
+  .legend button{display:flex;align-items:center;gap:7px;background:none;color:var(--dim);
+    border:1px solid transparent;border-radius:7px;padding:4px 9px;font:inherit;
+    font-size:12px;cursor:pointer}
+  .legend button:hover{border-color:var(--line)}
+  .legend button:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+  /* Off stages keep their slot so the row does not reflow as you toggle. */
+  .legend button.off{opacity:.4}
+  .legend button.off i{background:none !important;box-shadow:inset 0 0 0 1.5px currentColor}
+  .legend i{width:12px;height:3px;border-radius:2px;display:inline-block}
+  .gridline{stroke:var(--grid);stroke-width:1}
+  .note{color:var(--dim);font-size:13px;margin-top:10px}
+  .reportbar{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+  .reportbar select{background:#2a2f3d;color:var(--ink);border:1px solid var(--line);
+    border-radius:7px;padding:6px 8px;font:inherit;font-size:13px;margin-left:5px}
+  #runreport{min-width:150px}
+  #reportnote{min-height:34px}
+  .rstats{margin:18px 0 6px;gap:22px}
+  h3.sub{font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--dim);
+    font-weight:600;margin:20px 0 10px}
+  .reach{display:grid;grid-template-columns:auto 1fr auto;gap:7px 12px;align-items:center;
+    font-variant-numeric:tabular-nums;font-size:13px}
+  .reach .lbl{color:var(--dim)}
+  .reach .track{height:9px;background:#2a2f3d;border-radius:5px;overflow:hidden}
+  .reach .track i{display:block;height:100%;background:var(--accent);
+    transition:width .25s ease}
+  .reach .track.rare i{background:var(--good)}
+  .reach .pct{text-align:right;min-width:46px}
+  /* These two swap text as the game moves between stages and depths. Without a
+     reserved height the panel resizes underneath the board and the whole page
+     jitters, which is very visible on a projector. */
+  #stagenote{min-height:54px;margin-top:12px}
+  #depthnote{min-height:36px}
+  /* The right column is three separate talking points, not one scroll. Only
+     one is ever on the projector at a time. */
+  /* The evaluations give the move away before it is played, so they can be
+     hidden to let a room guess first. The heading and the toggle stay. */
+  .panelhead{display:flex;align-items:center;gap:12px;margin-bottom:14px}
+  .panelhead h2{margin:0}
+  button.ghost{margin-left:auto;background:none;border:1px solid var(--line);
+    color:var(--dim);padding:5px 11px;font-size:12px;font-weight:600;
+    text-transform:uppercase;letter-spacing:.07em}
+  button.ghost:hover{background:#2a2f3d;color:var(--ink)}
+  .tabs{display:flex;gap:6px}
+  .tabs button{background:none;border:1px solid transparent;border-radius:9px;
+    padding:8px 14px;color:var(--dim);font:inherit;font-size:12px;font-weight:600;
+    text-transform:uppercase;letter-spacing:.07em;cursor:pointer}
+  .tabs button:hover{color:var(--ink)}
+  .tabs button[aria-selected="true"]{background:var(--panel);border-color:var(--line);
+    color:var(--ink)}
+  .tabs button:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+  .err{color:#ff8a8a}
+</style>
+</head>
+<body>
+<header>
+  <h1>2048 agent</h1>
+  <span class="sub" id="subtitle"></span>
+</header>
+
+<main>
+  <section class="panel">
+    <div class="stats">
+      <div class="stat"><div class="k">score</div><div class="v" id="score">0</div></div>
+      <div class="stat"><div class="k">moves</div><div class="v" id="moves">0</div></div>
+      <div class="stat"><div class="k">best tile</div><div class="v" id="best">0</div></div>
+      <div class="stat"><div class="k">stage</div><div class="v" id="stage">1 of 4</div></div>
+    </div>
+    <div class="board" id="board"></div>
+    <div class="controls">
+      <button class="primary" id="playpause">Play</button>
+      <button id="back">Back</button>
+      <button id="step">Step</button>
+      <button id="newgame">New game</button>
+    </div>
+    <div class="controls row2">
+      <label class="muted depth">
+        <span class="rowlbl">search</span>
+        <select id="gamedepth">
+          <option value="1">1 ply</option>
+          <option value="2" selected>2 plies</option>
+          <option value="3">3 plies</option>
+        </select>
+      </label>
+      <label class="muted speed">
+        <span class="rowlbl">speed</span>
+        <input type="range" id="speed" min="1" max="120" value="18"
+               aria-label="playback speed, moves per second">
+        <span id="speedlabel">18/s</span>
+      </label>
+    </div>
+    <div class="scrub">
+      <span class="rowlbl">moves</span>
+      <input type="range" id="scrub" min="0" max="0" value="0"
+             aria-label="move within the game">
+      <span class="muted" id="scrublabel">move 0</span>
+    </div>
+  </section>
+
+  <div style="display:flex;flex-direction:column;gap:20px">
+    <div class="tabs" role="tablist">
+      <button role="tab" data-tab="think" aria-selected="true">Thinking</button>
+      <button role="tab" data-tab="strength" aria-selected="false">Strength report</button>
+      <button role="tab" data-tab="curve" aria-selected="false">Learning curve</button>
+    </div>
+    <section class="panel" data-panel="think">
+      <div class="panelhead">
+        <h2>What the agent is thinking</h2>
+        <button id="thinktoggle" class="ghost" aria-expanded="false"
+                aria-controls="thinkbody">Show</button>
+      </div>
+      <div id="thinkbody" hidden>
+      <table class="evals">
+        <thead><tr><th>move</th><th class="num">reward</th><th class="num" id="valhead">V(afterstate)</th><th class="num">total</th></tr></thead>
+        <tbody id="evals"></tbody>
+      </table>
+      <p class="note">It picks the move maximising <em>reward + V(afterstate)</em>.
+         V comes from 32 table lookups — no neural network, no search.</p>
+      <p class="note" id="stagenote"></p>
+      <p class="note" id="depthnote"></p>
+      </div>
+    </section>
+
+    <section class="panel" data-panel="strength" hidden>
+      <h2>Strength report</h2>
+      <div class="reportbar">
+        <button id="runreport">Run 200 games</button>
+        <label class="muted">games
+          <select id="reportgames">
+            <option>50</option><option selected>200</option>
+            <option>500</option><option>1000</option>
+          </select>
+        </label>
+        <label class="muted">depth
+          <select id="reportdepth">
+            <option value="1" selected>1 · greedy</option>
+            <option value="2">2 · search</option>
+            <option value="3">3 · search</option>
+          </select>
+        </label>
+      </div>
+      <p class="note" id="reportnote">Plays complete games with the current weights and
+        reports how often it actually builds each tile.</p>
+      <div id="reportbody" hidden>
+        <div class="stats rstats">
+          <div class="stat"><div class="k">average</div><div class="v" id="r-avg">–</div></div>
+          <div class="stat"><div class="k">median</div><div class="v" id="r-med">–</div></div>
+          <div class="stat"><div class="k">best</div><div class="v" id="r-best">–</div></div>
+          <div class="stat"><div class="k">moves/game</div><div class="v" id="r-moves">–</div></div>
+        </div>
+        <h3 class="sub">Reached this tile</h3>
+        <div class="reach" id="r-reach"></div>
+        <h3 class="sub">Games reaching each stage</h3>
+        <div class="reach" id="r-stages"></div>
+      </div>
+    </section>
+
+    <section class="panel" data-panel="curve" hidden>
+      <h2>Learning curve</h2>
+      <svg id="curve" viewBox="0 0 480 230" preserveAspectRatio="none"></svg>
+      <div class="legend" id="curvelegend"></div>
+      <p class="note" id="curvenote">average score per block of self-play games</p>
+    </section>
+  </div>
+</main>
+
+<script>
+const STAGE_COLOR = ['#6ea8ff', '#5ddc9a', '#f2c14e', '#e8776b'];
+const TILE = {
+  0:['#343849','#343849'], 1:['#eee4da','#4b4740'], 2:['#ede0c8','#4b4740'],
+  3:['#f2b179','#fff'], 4:['#f59563','#fff'], 5:['#f67c5f','#fff'], 6:['#f65e3b','#fff'],
+  7:['#edcf72','#fff'], 8:['#edcc61','#fff'], 9:['#edc850','#fff'], 10:['#edc53f','#fff'],
+  11:['#edc22e','#fff'], 12:['#3c7dd9','#fff'], 13:['#2f6ecb','#fff'],
+  14:['#265fb5','#fff'], 15:['#1d4f9e','#fff'], 16:['#16407f','#fff']
+};
+const DIRS = ['up','right','down','left'];
+const N_STAGES = 4;
+const STAGE_NOTE = [
+  'Stage 1 of 4 — no 16384 yet. Still being scored on "build something", which is where almost every game spends its moves.',
+  'Stage 2 of 4 — a 16384 has appeared. From here the advice changes: protect what you built.',
+  'Stage 3 of 4 — a 16384 and an 8192 have been on the board together. Separate weights for the endgame ladder.',
+  'Stage 4 of 4 — 16384, 8192 and 4096 together. The rarest positions in the game get their own network.',
+];
+const $ = id => document.getElementById(id);
+
+let game = null, idx = 0, timer = null;
+
+const boardEl = $('board');
+const cellEls = [];
+for (let i = 0; i < 16; i++) {
+  const d = document.createElement('div');
+  d.className = 'cell';
+  boardEl.appendChild(d);
+  cellEls.push(d);
+}
+
+function drawFrame(i) {
+  const f = game.frames[i];
+  f.cells.forEach((k, n) => {
+    const [bg, fg] = TILE[k] || TILE[16];
+    const el = cellEls[n];
+    el.style.background = bg;
+    el.style.color = fg;
+    el.textContent = k ? (1 << k) : '';
+  });
+  $('score').textContent = f.score.toLocaleString();
+  $('moves').textContent = i.toLocaleString();
+  $('best').textContent = (1 << Math.max(...f.cells)).toLocaleString();
+  $('stage').textContent = `${(f.stage || 0) + 1} of ${N_STAGES}`;
+  $('stagenote').textContent = STAGE_NOTE[f.stage || 0];
+  var depth = f.depth || 1;
+  $('valhead').textContent = depth > 1 ? 'expectimax ' + depth : 'V(afterstate)';
+  $('depthnote').textContent = depth > 1
+    ? 'Looking ' + depth + ' decisions ahead, averaging over every tile the game could drop next.'
+    : 'Greedy: one move ahead, one table lookup per option — the same player that trained.';
+
+  const totals = f.evals.map(e => e ? e[0] + e[1] : null).filter(v => v !== null);
+  const lo = Math.min(...totals), hi = Math.max(...totals), span = (hi - lo) || 1;
+  $('evals').innerHTML = f.evals.map((e, d) => {
+    if (!e) return `<tr class="illegal">
+      <td>${DIRS[d]}<div class="bar"><i style="width:0"></i></div></td>
+      <td class="num">–</td><td class="num">illegal</td><td class="num">–</td></tr>`;
+    const total = e[0] + e[1];
+    const pct = ((total - lo) / span) * 100;
+    const cls = d === f.chosen ? 'chosen' : '';
+    return `<tr class="${cls}">
+      <td>${DIRS[d]}${d === f.chosen ? '<span class="pick">chosen</span>' : ''}
+          <div class="bar"><i style="width:${pct}%"></i></div></td>
+      <td class="num">${e[0] > 0 ? '+' + e[0] : e[0]}</td>
+      <td class="num">${e[1].toLocaleString(undefined,{maximumFractionDigits:0})}</td>
+      <td class="num">${total.toLocaleString(undefined,{maximumFractionDigits:0})}</td></tr>`;
+  }).join('');
+
+  $('scrub').value = i;
+  // Nothing here may reveal the ending. Not the final score, not the best tile,
+  // and not the length of the game, which tells an audience how well it went
+  // before a single move is played. The score and best-tile readouts above the
+  // board already show the outcome the moment playback reaches it.
+  $('scrublabel').textContent = `move ${i.toLocaleString()}`;
+}
+
+function setPlaying(on) {
+  if (timer) { clearInterval(timer); timer = null; }
+  $('playpause').textContent = on ? 'Pause' : 'Play';
+  if (!on) return;
+  const rate = +$('speed').value;
+  timer = setInterval(() => {
+    if (idx >= game.frames.length - 1) { setPlaying(false); return; }
+    drawFrame(++idx);
+  }, 1000 / rate);
+}
+
+// The server plays the WHOLE game before it sends a single frame: about 0.2s at
+// one ply, 3s at two, a full minute at three. Without a visible counter that
+// looks like a hang, so the button says how long it has been waiting, and the
+// transport controls are disabled meanwhile because they would act on the
+// previous game.
+let busyTimer = null;
+function setBusy(on) {
+  const btn = $('newgame');
+  ['playpause', 'back', 'step', 'gamedepth', 'scrub'].forEach(id => { $(id).disabled = on; });
+  btn.disabled = on;
+  if (busyTimer) { clearInterval(busyTimer); busyTimer = null; }
+  if (!on) { btn.textContent = 'New game'; return; }
+  const t0 = Date.now();
+  const tick = () => {
+    btn.textContent = `Playing… ${Math.round((Date.now() - t0) / 1000)}s`;
+  };
+  tick();
+  busyTimer = setInterval(tick, 250);
+}
+
+async function newGame(autoplay = true) {
+  setPlaying(false);
+  setBusy(true);
+  try {
+    const res = await fetch('/api/game?depth=' + $('gamedepth').value
+                            + '&seed=' + Math.floor(Math.random() * 1e9));
+    game = await res.json();
+    if (game.error) throw new Error(game.error);
+  } catch (err) {
+    $('subtitle').innerHTML = `<span class="err">could not reach the agent: ${err.message}</span>`;
+    return;
+  } finally {
+    setBusy(false);
+  }
+  idx = 0;
+  $('scrub').max = game.frames.length - 1;
+  drawFrame(0);
+  if (autoplay) setPlaying(true);
+}
+
+$('playpause').onclick = () => setPlaying(!timer);
+$('step').onclick = () => { setPlaying(false); if (idx < game.frames.length - 1) drawFrame(++idx); };
+$('back').onclick = () => { setPlaying(false); if (idx > 0) drawFrame(--idx); };
+// Arrow keys do the same, so the demo can be driven from a clicker.
+document.addEventListener('keydown', e => {
+  if (e.target.matches('input, select, textarea')) return;
+  if (e.key === 'ArrowLeft')  { e.preventDefault(); $('back').click(); }
+  if (e.key === 'ArrowRight') { e.preventDefault(); $('step').click(); }
+  if (e.key === ' ')          { e.preventDefault(); $('playpause').click(); }
+});
+$('newgame').onclick = newGame;
+$('gamedepth').onchange = newGame;      // a depth change only takes effect on a new game
+
+function bars(host, rows, label, rareAbove) {
+  host.innerHTML = rows.map(r => `
+    <div class="lbl">${label(r)}</div>
+    <div class="track${r.pct <= rareAbove ? ' rare' : ''}"><i style="width:${r.pct}%"></i></div>
+    <div class="pct">${r.pct}%</div>`).join('');
+}
+
+async function runReport() {
+  const btn = $('runreport');
+  const games = $('reportgames').value, depth = $('reportdepth').value;
+  btn.disabled = true;
+  btn.textContent = 'Playing…';
+  $('reportnote').textContent =
+    `Playing ${games} complete games at depth ${depth}. Deeper search is far slower — ` +
+    `depth 3 costs roughly 400x depth 1 per move.`;
+  try {
+    const res = await fetch(`/api/report?games=${games}&depth=${depth}`);
+    const r = await res.json();
+    if (r.error) throw new Error(r.error);
+    $('r-avg').textContent = r.average.toLocaleString();
+    $('r-med').textContent = r.median.toLocaleString();
+    $('r-best').textContent = r.best.toLocaleString();
+    $('r-moves').textContent = r.moves_per_game.toLocaleString();
+    bars($('r-reach'), r.reach, x => x.tile.toLocaleString(), 25);
+    bars($('r-stages'), r.stages, x => 'stage ' + x.stage, 25);
+    $('reportbody').hidden = false;
+    $('reportnote').textContent =
+      `${r.games.toLocaleString()} games at depth ${r.depth} in ${r.seconds}s ` +
+      `(${r.games_per_sec}/sec). Worst game ${r.worst.toLocaleString()}.`;
+  } catch (err) {
+    $('reportnote').innerHTML = `<span class="err">report failed: ${err.message}</span>`;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = `Run ${games} games`;
+  }
+}
+$('runreport').onclick = runReport;
+$('reportgames').onchange = e => { $('runreport').textContent = `Run ${e.target.value} games`; };
+$('scrub').oninput = e => { setPlaying(false); idx = +e.target.value; drawFrame(idx); };
+$('speed').oninput = e => { $('speedlabel').textContent = e.target.value + '/s'; if (timer) setPlaying(true); };
+
+// Kept outside the draw so toggles survive the 20s refresh.
+let curveSeries = [];
+const curveOff = new Set();
+const keyOf = t => `${t.run || 0}:${t.stage}`;
+
+async function drawCurve() {
+  try { curveSeries = await (await fetch('/api/curve')).json(); } catch (e) { return; }
+  renderCurve();
+}
+
+function renderCurve() {
+  const all = curveSeries.filter(t => t.rows.length);
+  if (!all.length) { $('curvenote').textContent = 'no learning curve yet \u2014 run the trainer'; return; }
+  const shown = all.filter(t => !curveOff.has(keyOf(t)));
+
+  // Each stage is its own run over its own restart boards, so they share an x
+  // axis of games-within-the-stage rather than being laid end to end. Scores
+  // carry forward across stages, so a stage starting higher than the one below
+  // it is the curriculum working, not a break in the data.
+  const W = 480, H = 230, padl = 56, padb = 30, padt = 10, padr = 8;
+  const scaleTo = shown.length ? shown : all;
+  const xmax = Math.max(...scaleTo.map(t => t.rows[t.rows.length - 1].games));
+  let lo = Math.min(...scaleTo.map(t => Math.min(...t.rows.map(r => r.avg))));
+  let hi = Math.max(...scaleTo.map(t => Math.max(...t.rows.map(r => r.avg))));
+  // Fit the visible stages rather than anchoring at zero: a late stage moves a
+  // few percent over its whole run and is invisible on a 0-based axis.
+  const span = (hi - lo) || Math.max(hi, 1);
+  lo -= span * 0.08; hi += span * 0.08;
+  if (lo < 0) lo = 0;
+  const px = x => padl + (x / xmax) * (W - padl - padr);
+  const py = y => H - padb - ((y - lo) / (hi - lo)) * (H - padb - padt);
+
+  let body = '';
+  for (const t of shown) {
+    const c = STAGE_COLOR[t.stage % STAGE_COLOR.length];
+    // Mark a *step* drop only. A cosine run's alpha falls every block, so
+    // "first row below the first alpha" would draw a line at game zero and mean
+    // nothing; require the halving that only a discrete drop produces.
+    let dec = null;
+    for (let i = 1; i < t.rows.length; i++) {
+      const prev = t.rows[i - 1].alpha, cur = t.rows[i].alpha;
+      if (prev && cur && cur <= prev * 0.5) { dec = t.rows[i]; break; }
+    }
+    if (dec) body += `<line class="decay" style="stroke:${c}" x1="${px(dec.games).toFixed(1)}" y1="${padt}" `
+                   + `x2="${px(dec.games).toFixed(1)}" y2="${H - padb}"/>`;
+    const d = t.rows.map((r, i) => (i ? 'L' : 'M') + px(r.games).toFixed(1) + ' ' + py(r.avg).toFixed(1)).join(' ');
+    const alt = (t.run || 0) ? ' alt' : '';
+    body += `<path class="curve${alt}" style="stroke:${c}" d="${d}"/>`;
+  }
+
+  let ticks = '';
+  for (let i = 0; i <= 2; i++) {
+    const v = lo + (hi - lo) * i / 2, y = py(v);
+    ticks += `<line class="gridline" x1="${padl}" y1="${y.toFixed(1)}" x2="${W - padr}" y2="${y.toFixed(1)}"/>`
+           + `<text x="${padl - 6}" y="${(y + 4).toFixed(1)}" fill="#98a0b3" font-size="11" `
+           + `text-anchor="end">${Math.round(v).toLocaleString()}</text>`;
+  }
+
+  $('curve').innerHTML = `
+    ${ticks}
+    <line class="axis" x1="${padl}" y1="${H - padb}" x2="${W - padr}" y2="${H - padb}"/>
+    <line class="axis" x1="${padl}" y1="${padt}" x2="${padl}" y2="${H - padb}"/>
+    ${body}
+    <text x="${W - padr}" y="${H - 10}" fill="#98a0b3" font-size="11" text-anchor="end">${xmax.toLocaleString()} games per stage</text>`;
+
+  const multi = new Set(all.map(t => t.run || 0)).size > 1;
+  $('curvelegend').innerHTML = all.map(t => {
+    const c = STAGE_COLOR[t.stage % STAGE_COLOR.length];
+    const last = t.rows[t.rows.length - 1];
+    const k = keyOf(t);
+    const off = curveOff.has(k) ? ' off' : '';
+    const alt = (t.run || 0) ? ' alt' : '';
+    const name = multi ? `s${t.stage} ${t.label}` : `stage ${t.stage}`;
+    return `<button class="lg${off}" data-key="${k}" aria-pressed="${!off}">`
+         + `<i class="${alt}" style="background:${c};color:${c}"></i>`
+         + `${name} \u00b7 ${Math.round(last.avg).toLocaleString()}</button>`;
+  }).join('');
+
+  $('curvenote').textContent = !shown.length
+    ? 'all curves hidden \u2014 click one to bring it back'
+    : multi
+    ? 'solid = step schedule, dashed = cosine \u00b7 same colour is the same stage \u00b7 '
+      + 'click to hide \u00b7 vertical line marks a step-size drop'
+    : 'click a stage to hide it \u00b7 the axis rescales to what is shown \u00b7 '
+      + 'dashed line marks the step-size drop';
+}
+
+$('curvelegend').onclick = e => {
+  const b = e.target.closest('button[data-key]');
+  if (!b) return;
+  const k = b.dataset.key;
+  curveOff.has(k) ? curveOff.delete(k) : curveOff.add(k);
+  renderCurve();
+};
+
+$('thinktoggle').onclick = () => {
+  const body = $('thinkbody'), btn = $('thinktoggle');
+  body.hidden = !body.hidden;
+  btn.textContent = body.hidden ? 'Show' : 'Hide';
+  btn.setAttribute('aria-expanded', String(!body.hidden));
+};
+
+document.querySelector('.tabs').onclick = e => {
+  const b = e.target.closest('button[data-tab]');
+  if (!b) return;
+  document.querySelectorAll('.tabs button').forEach(
+    x => x.setAttribute('aria-selected', String(x === b)));
+  document.querySelectorAll('[data-panel]').forEach(
+    p => { p.hidden = p.dataset.panel !== b.dataset.tab; });
+};
+
+newGame(false);          // open on the first move, paused, ready to talk over
+drawCurve();
+setInterval(drawCurve, 20000);   // refresh while training runs in another terminal
+</script>
+</body>
+</html>

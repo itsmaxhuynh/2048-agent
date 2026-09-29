@@ -1,6 +1,7 @@
 # 2048, learned in Python
 
-A 2048 agent that teaches itself to play, written for a talk at Python Adelaide.
+A 2048 agent that teaches itself to play, written for a talk at
+[Python Adelaide](https://www.meetup.com/en-au/pythonadelaide/events/316478346/).
 No neural network: the value function is four lookup tables, and learning is
 adding a number to 32 array cells.
 
@@ -17,11 +18,133 @@ python3 -m venv .venv && ./.venv/bin/pip install numpy numba
 
 ./.venv/bin/python -m game2048.bench        # the optimisation ladder
 ./.venv/bin/python -m game2048.train --games 50000   # train (checkpoints as it goes)
-./.venv/bin/python -m game2048.play --weights weights/agent.npy      # watch in the terminal
-./.venv/bin/python -m game2048.server --open                          # watch in a browser
 ```
 
 `numba` is optional -- everything runs without it, about 78x slower.
+
+## Training
+
+Training follows the paper's multi-stage recipe. Stage 0 learns from empty
+boards. Each later stage starts from boards where the stage below first reached
+a milestone (16384; then 16384 + 8192; then 16384 + 8192 + 4096), so it spends
+its games on the endgame instead of replaying the opening. Each stage is one
+256 MB file, `<stem>.stage0.npy` to `<stem>.stage3.npy`, under `weights/`.
+
+### The whole ladder, one command
+
+```sh
+./scripts/curriculum.sh           # the paper's step schedule -> weights/agent.*
+./scripts/curriculum-cosine.sh    # cosine annealing           -> weights/cosine.*
+```
+
+These run for many hours. Progress goes to `talk/curriculum*.log` and the
+learning curves to `talk/*curve-stage*.csv`. You can kill them at any point:
+a checkpoint is written every 10 minutes, and re-running the script resumes
+from where it stopped.
+
+`curriculum.sh` begins at stage 1, so train stage 0 first (next section).
+`curriculum-cosine.sh` does all four stages itself.
+
+The strongest checkpoint, `cosine2m`, is the cosine script at 2M games per stage.
+It took about 20 hours on a 4-core laptop:
+
+```sh
+STEM=weights/cosine2m.npy ALPHA_FINAL=0.0001 \
+G0=2000000 G1=2000000 G2=2000000 G3=2000000 \
+    ./scripts/curriculum-cosine.sh
+```
+
+### One stage at a time
+
+```sh
+# stage 0 from scratch; the paper's schedule drops alpha once the curve flattens
+./.venv/bin/python -m game2048.train --stage 0 --games 2000000 \
+    --auto-decay --stop-when-saturated --log talk/curve-stage0.csv
+
+# play the finished stage 0, saving the boards that cross into stage 1
+./.venv/bin/python -m game2048.train --collect 1 --max-restarts 50000
+
+# train stage 1 from those boards; repeat collect + train for stages 2 and 3
+./.venv/bin/python -m game2048.train --stage 1 --games 2000000 \
+    --auto-decay --stop-when-saturated --log talk/curve-stage1.csv
+```
+
+Useful flags:
+
+* `--out weights/NAME.npy` sets the checkpoint stem. The default is
+  `weights/agent.npy`.
+* `--resume` continues an existing stage instead of starting it from zero.
+* `--schedule cosine --anneal-over N` anneals alpha smoothly over N games,
+  replacing the single drop. The ramp follows the stage's total game count, so
+  pass `--anneal-over` again whenever you `--resume`.
+* `--alpha` is the step size for each weight (default 0.0025, the paper's
+  value), not a total spread across the 32 lookups.
+
+A run holds just one stage's 256 MB table in memory: training loads the stage
+it trains, and collecting loads the stage below. Ctrl-C finishes the current
+game, saves, and exits; on its own, `train` checkpoints every 5 minutes
+(`--save-every`, in seconds).
+
+Check a run with `scripts/eval_parallel.py`. `play.py --eval` won't work here:
+it looks for the stem file itself, and staged training only writes the
+`.stageK` files.
+
+## Watching it play
+
+Two viewers, same agent. Both take `--weights` (the *base* name: the real files
+carry a stage suffix, so `weights/cosine2m.npy` loads `cosine2m.stage0.npy`
+through `cosine2m.stage3.npy`) and `--depth` (expectimax decision levels; 1 is
+the greedy player training uses, 2 is the good default, 3 is very slow).
+
+### In the terminal
+
+```sh
+# one game, 2-ply search, tiles drawn in ANSI colour
+./.venv/bin/python -m game2048.play --weights weights/cosine2m.npy --depth 2
+
+# slow it down so the board is readable, and play three in a row
+./.venv/bin/python -m game2048.play --weights weights/cosine2m.npy --depth 2 \
+    --delay 0.3 --games 3
+
+# no display at all: play N games and print reach rates and averages
+./.venv/bin/python -m game2048.play --weights weights/cosine2m.npy --depth 2 --eval 100
+```
+
+A 2-ply game is about 11,000 moves and takes a few seconds; `--delay 0` plays
+as fast as the terminal can scroll. For a serious measurement use
+`scripts/eval_parallel.py` instead, which forks four workers over the shared
+tables:
+
+```sh
+./.venv/bin/python scripts/eval_parallel.py --games 1000 --depth 2 --jobs 4
+```
+
+### In a browser
+
+```sh
+./.venv/bin/python -m game2048.server --weights weights/cosine2m.npy --depth 2 \
+    --curve talk/cosine2m-curve-stage0.csv --curve-label cosine --open
+```
+
+It plays a complete game up front, then serves it back as a scrubbable replay on
+<http://127.0.0.1:8000>, so nothing on screen is a live search.
+
+* **Play / Back / Step / New game**, or the left and right arrow keys and space.
+* **search** picks 1, 2 or 3 plies for the *next* game. Recording one costs
+  about 0.2 s at 1 ply, 4 s at 2, and a minute at 3, so New game shows a timer.
+* The right-hand column tabs between **Thinking** (what the agent scored each
+  move at, for the move on screen), **Strength** (reach rates over a batch of
+  games it plays on demand) and **Curve** (the training curve from `--curve`,
+  a CSV that training writes under `talk/`; leave it out if you haven't trained).
+
+Useful extras: `--port 8137` to move it, `--host 0.0.0.0` to reach it from
+another machine, `--compare talk/step2m-curve-stage0.csv` to overlay a second
+run on the curve, and `--reload` to re-read the checkpoint before every game so
+you can watch an agent improve while it is still training.
+
+Other trained checkpoints in `weights/`: `step2m.npy` (the paper's step
+schedule, 2M games), `cosine2m.npy` (cosine annealing, 2M games, the strongest),
+`cosine.npy` and `agent.npy` (earlier, shorter runs).
 
 ## What is in here
 
@@ -38,7 +161,6 @@ python3 -m venv .venv && ./.venv/bin/pip install numpy numba
 | `game2048/server.py` + `web/` | Browser viewer: playback, scrubbing, evaluations, learning curve. |
 | `game2048/bench.py` | Measures every rung of the optimisation ladder. |
 | `tests/` | The fast versions must agree with the obvious one, always. |
-| `talk/` | Speech plan, benchmark output, learning curve. |
 
 ## How it learns
 

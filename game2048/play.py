@@ -165,8 +165,11 @@ def main(argv=None):
                         "player; 2-3 are much stronger and much slower)")
     args = p.parse_args(argv)
 
-    if not os.path.exists(args.weights):
-        print(f"no weights at {args.weights} -- train first:\n"
+    # --weights names the base path; staged training writes agent.stageK.npy and
+    # never the base name itself, so test for stage 0 the way server.py does.
+    stage0 = fast.stage_path(args.weights, 0)
+    if not os.path.exists(stage0):
+        print(f"no weights at {stage0} -- train first:\n"
               f"  python -m game2048.train --games 50000", file=sys.stderr)
         return 1
     print(f"loading {args.weights} ...", flush=True)

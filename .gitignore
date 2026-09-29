@@ -1,0 +1,11 @@
+.venv/
+weights/
+__pycache__/
+*.pyc
+
+# talk deck and office lock files
+*.pptx
+*.pdf
+.~lock.*#
+
+talk/
